@@ -247,6 +247,8 @@ static HRESULT CxbxSetIndices(IDirect3DIndexBuffer* pHostIndexBuffer)
 
 	if (FAILED(hRet))
 		CxbxrKrnlAbort("CxbxSetIndices: SetIndices Failed!"); // +DxbxD3DErrorString(hRet));
+
+	return hRet;
 }
 
 static void CxbxImGui_RenderD3D9(ImGuiUI* m_imgui, IDirect3DSurface* renderTarget)
