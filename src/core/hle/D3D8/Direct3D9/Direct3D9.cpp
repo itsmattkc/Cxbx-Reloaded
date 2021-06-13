@@ -251,9 +251,13 @@ static void CxbxSetIndices(IDirect3DIndexBuffer* pHostIndexBuffer)
 		CxbxrKrnlAbort("CxbxSetIndices: SetIndices Failed!"); // +DxbxD3DErrorString(hRet));
 }
 
-static void CxbxImGui_RenderD3D9(ImGuiUI* m_imgui, IDirect3DSurface* renderTarget)
+static void CxbxImGui_RenderD3D(ImGuiUI* m_imgui, IDirect3DSurface* renderTarget)
 {
+#ifdef CXBX_USE_D3D11
+	ImGui_ImplDX11_NewFrame();
+#else
 	ImGui_ImplDX9_NewFrame();
+#endif
 	ImGui_ImplWin32_NewFrame();
 	ImGui::NewFrame();
 
@@ -268,7 +272,11 @@ static void CxbxImGui_RenderD3D9(ImGuiUI* m_imgui, IDirect3DSurface* renderTarge
 		IDirect3DSurface* pExistingRenderTarget = nullptr;
 		if (SUCCEEDED(g_pD3DDevice->GetRenderTarget(0, &pExistingRenderTarget))) {
 			(void)CxbxSetRenderTarget(renderTarget);
+#ifdef CXBX_USE_D3D11
+			ImGui_ImplDX11_RenderDrawData(drawData);
+#else
 			ImGui_ImplDX9_RenderDrawData(drawData);
+#endif
 			(void)CxbxSetRenderTarget(pExistingRenderTarget);
 			pExistingRenderTarget->Release();
 		}
@@ -2534,8 +2542,8 @@ static void CreateDefaultD3D9Device
 	// If the project is in a debug build, enable debugging via SDK Layers.
 	creationFlags |= D3D11_CREATE_DEVICE_DEBUG;
 #endif
-	// only use feature level 11.1.
-	D3D_FEATURE_LEVEL featureLevels[] = { D3D_FEATURE_LEVEL_11_1 };
+	// only use feature level 10.0
+	D3D_FEATURE_LEVEL featureLevels[] = { D3D_FEATURE_LEVEL_10_0 };
 	// Create the Direct3D 11 API device object and a corresponding context.
 	ComPtr<ID3D11Device> device;
 	ComPtr<ID3D11DeviceContext> context;
@@ -5660,7 +5668,7 @@ xbox::dword_xt WINAPI xbox::EMUPATCH(D3DDevice_Swap)
 		}
 
 		// Render ImGui
-		static std::function<void(ImGuiUI*, IDirect3DSurface*)> internal_render = &CxbxImGui_RenderD3D9;
+		static std::function<void(ImGuiUI*, IDirect3DSurface*)> internal_render = &CxbxImGui_RenderD3D;
 		g_renderbase->Render(internal_render, pCurrentHostBackBuffer);
 
 		pCurrentHostBackBuffer->Release();
@@ -5954,7 +5962,7 @@ void CreateHostResource(xbox::X_D3DResource *pResource, DWORD D3DUsage, int iTex
 
 		if (EmuXBFormatRequiresConversionToARGB(X_Format)) {
 			bConvertToARGB = true;
-			PCFormat = D3DFMT_A8R8G8B8;
+			PCFormat = _9_11(D3DFMT_A8R8G8B8, DXGI_FORMAT_B8G8R8A8_UNORM);
 
 			// Unset D3DUSAGE_DEPTHSTENCIL: It's not possible for ARGB textures to be depth stencils
 			// Fixes CreateTexture error in Virtua Cop 3 (Chihiro)
@@ -5974,7 +5982,7 @@ void CreateHostResource(xbox::X_D3DResource *pResource, DWORD D3DUsage, int iTex
 				} else if (EmuXBFormatCanBeConvertedToARGB(X_Format)) {
 					EmuLog(LOG_LEVEL::WARNING, "Xbox %s Format %x will be converted to ARGB", ResourceTypeName, X_Format);
 					bConvertToARGB = true;
-					PCFormat = D3DFMT_A8R8G8B8;
+					PCFormat = _9_11(D3DFMT_A8R8G8B8, DXGI_FORMAT_B8G8R8A8_UNORM);
 				} else {
 					// Otherwise, use a best matching format
 					/*CxbxrKrnlAbort*/EmuLog(LOG_LEVEL::WARNING, "Encountered a completely incompatible %s format!", ResourceTypeName);
@@ -6131,24 +6139,46 @@ void CreateHostResource(xbox::X_D3DResource *pResource, DWORD D3DUsage, int iTex
 		}
 
 		case xbox::X_D3DRTYPE_TEXTURE: {
+#ifdef CXBX_USE_D3D11
+			D3D11_TEXTURE2D_DESC desc;
+			desc.Width = hostWidth;
+			desc.Height = hostHeight;
+			desc.MipLevels = dwMipMapLevels;
+			desc.ArraySize = 1;
+			desc.Format = PCFormat;
+			desc.SampleDesc.Count = 1;
+			desc.Usage = D3D11_USAGE_DYNAMIC;
+			desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+			desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+			desc.MiscFlags = 0;
+
+			hRet = g_pD3DDevice->CreateTexture2D(&desc, NULL, &pNewHostTexture);
+			DEBUG_D3DRESULT(hRet, "g_pD3DDevice->CreateTexture2D");
+#else
 			hRet = g_pD3DDevice->CreateTexture(hostWidth, hostHeight, dwMipMapLevels,
 				D3DUsage, PCFormat, D3DPool, &pNewHostTexture,
 				nullptr
 			);
 			DEBUG_D3DRESULT(hRet, "g_pD3DDevice->CreateTexture");
+#endif
 
 			// If the above failed, we might be able to use an ARGB texture instead
-			if ((hRet != D3D_OK) && (PCFormat != D3DFMT_A8R8G8B8) && EmuXBFormatCanBeConvertedToARGB(X_Format)) {
+			if ((hRet != D3D_OK) && (PCFormat != _9_11(D3DFMT_A8R8G8B8, DXGI_FORMAT_B8G8R8A8_UNORM)) && EmuXBFormatCanBeConvertedToARGB(X_Format)) {
+#ifdef CXBX_USE_D3D11
+				desc.Format = D3DFMT_A8R8G8B8;
+				hRet = g_pD3DDevice->CreateTexture2D(&desc, NULL, &pNewHostTexture);
+				DEBUG_D3DRESULT(hRet, "g_pD3DDevice->CreateTexture2D");
+#else
 				hRet = g_pD3DDevice->CreateTexture(hostWidth, hostHeight, dwMipMapLevels,
-					D3DUsage, D3DFMT_A8R8G8B8, D3DPool, &pNewHostTexture,
+					D3DUsage, _9_11(D3DFMT_A8R8G8B8, DXGI_FORMAT_B8G8R8A8_UNORM), D3DPool, &pNewHostTexture,
 					nullptr
 				);
 				DEBUG_D3DRESULT(hRet, "g_pD3DDevice->CreateTexture(D3DFMT_A8R8G8B8)");
-
+#endif
 				if (hRet == D3D_OK) {
 					// Okay, now this works, make sure the texture gets converted
 					bConvertToARGB = true;
-					PCFormat = D3DFMT_A8R8G8B8;
+					PCFormat = _9_11(D3DFMT_A8R8G8B8, DXGI_FORMAT_B8G8R8A8_UNORM);
 				}
 			}
 
@@ -6159,18 +6189,6 @@ void CreateHostResource(xbox::X_D3DResource *pResource, DWORD D3DUsage, int iTex
                     nullptr
                 );
             }
-
-			/*if(FAILED(hRet))
-			{
-				hRet = g_pD3DDevice->CreateTexture
-				(
-					dwWidth, dwHeight, dwMipMapLevels, D3DUsage, PCFormat,
-					D3DPOOL_SYSTEMMEM, &pNewHostTexture,
-					nullptr
-					);
-				DEBUG_D3DRESULT(hRet, "g_pD3DDevice->CreateTexture(D3DPOOL_SYSTEMMEM)");
-			}*/
-
 
 			if (hRet != D3D_OK) {
 				CxbxrKrnlAbort("CreateTexture Failed!\n\n"
