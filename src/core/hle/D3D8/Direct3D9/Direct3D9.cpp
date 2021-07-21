@@ -96,6 +96,7 @@ HWND                                g_hEmuWindow   = NULL; // rendering window
 bool                                g_bClipCursor  = false; // indicates that the mouse cursor should be confined inside the rendering window
 IDirect3DDevice                    *g_pD3DDevice   = nullptr; // Direct3D Device
 #ifdef CXBX_USE_D3D11
+IDXGISwapChain                     *g_pSwapChain   = nullptr; // Direct3D 11 Swap Chain
 ID3D11DeviceContext                *g_pD3DDeviceContext = nullptr; // Direct3D 11 Device Context
 #endif
 
@@ -121,7 +122,7 @@ static DWORD						g_dwPrimPerFrame = 0;	// Number of primitives within one frame
 static float                        g_AspectRatioScale = 1.0f;
 static UINT                         g_AspectRatioScaleWidth = 0;
 static UINT                         g_AspectRatioScaleHeight = 0;
-static D3DSURFACE_DESC              g_HostBackBufferDesc;
+static D3DSurfaceDesc               g_HostBackBufferDesc;
 static Settings::s_video            g_XBVideo;
 
 // D3D based variables
@@ -2272,7 +2273,7 @@ void UpdateDepthStencilFlags(IDirect3DSurface *pDepthStencilSurface)
 	g_bHasDepth = false;
 	g_bHasStencil = false;
 	if (pDepthStencilSurface != nullptr) {
-		D3DSURFACE_DESC Desc;
+		D3DSurfaceDesc Desc;
 		pDepthStencilSurface->GetDesc(&Desc);
 
 		switch (Desc.Format) {
@@ -2546,6 +2547,27 @@ static void CreateDefaultD3D9Device
 #endif
 	// only use feature level 10.0
 	D3D_FEATURE_LEVEL featureLevels[] = { D3D_FEATURE_LEVEL_10_0 };
+
+#if 0
+	DXGI_SWAP_CHAIN_DESC SwapChainDesc;
+
+	// Create the Direct3D 11 API device object and a corresponding context.
+	HRESULT hr = D3D11CreateDeviceAndSwapChain(
+		g_EmuCDPD.Adapter, // NULL
+		g_EmuCDPD.DeviceType, // D3D_DRIVER_TYPE_HARDWARE
+		nullptr, // Software
+		creationFlags,
+		featureLevels,
+		ARRAYSIZE(featureLevels),
+		D3D11_SDK_VERSION, // UWP apps must set this to D3D11_SDK_VERSION.
+		&SwapChainDesc,
+		&g_pSwapChain,
+		&g_pD3DDevice, // Returns the Direct3D device created.
+		nullptr, // pFeatureLevel
+		&g_pD3DDeviceContext // Returns the device immediate context.
+	);
+    DEBUG_D3DRESULT(hr, "D3D11CreateDevice");
+#else
 	// Create the Direct3D 11 API device object and a corresponding context.
 	ComPtr<ID3D11Device> device;
 	ComPtr<ID3D11DeviceContext> context;
@@ -2585,17 +2607,18 @@ static void CreateDefaultD3D9Device
 	dxgiFactory->CreateSwapChainForCoreWindow(
 		g_pD3DDevice.Get(),
 		reinterpret_cast<IUnknown*>(window),
-		&swapChainDesc,
+		&SwapChainDesc,
 		nullptr,
 		&swapChain
 	);
-	swapChain.As(&m_swapChain);
+	swapChain.As(&g_pSwapChain);
 
 	dxgiDevice->SetMaximumFrameLatency(1);
+#endif
 
 	// Configure the back buffer as a render target
 	ComPtr<ID3D11Texture2D> backBuffer;
-	m_swapChain->GetBuffer(
+	g_pSwapChain->GetBuffer(
 		0,
 		__uuidof(ID3D11Texture2D),
 		&backBuffer
@@ -2608,7 +2631,7 @@ static void CreateDefaultD3D9Device
 		&m_renderTargetView
 	);
 
-	D3D11_TEXTURE2D_DESC backBufferDesc = { 0 };
+	D3DSurfaceDesc/*=D3D11_TEXTURE2D_DESC*/ backBufferDesc = { 0 };
 	backBuffer->GetDesc(&backBufferDesc);
 
 	CD3D11_VIEWPORT viewport(
@@ -2716,13 +2739,11 @@ static void EmuVerifyResourceIsRegistered(xbox::X_D3DResource *pResource, DWORD 
             // would be overwritten by the surface created in SetRenderTarget
             // However, if a non-rendertarget surface is used here, we'll need to recreate it as a render target!
             auto hostResource = it->second.pHostResource;
-            auto xboxSurface = (xbox::X_D3DSurface*)pResource;
-            auto xboxTexture = (xbox::X_D3DTexture*)pResource;
             auto xboxResourceType = GetXboxD3DResourceType(pResource);
 
             // Determine if the associated host resource is a render target already, if so, do nothing
             HRESULT hRet = STATUS_INVALID_PARAMETER; // Default to an error condition, so we can use D3D_OK to check for success
-            D3DSURFACE_DESC surfaceDesc;
+            D3DSurfaceDesc surfaceDesc;
             if (xboxResourceType == xbox::X_D3DRTYPE_SURFACE) {
                 hRet = ((IDirect3DSurface*)hostResource)->GetDesc(&surfaceDesc);
             } else if (xboxResourceType == xbox::X_D3DRTYPE_TEXTURE) {
@@ -2741,6 +2762,8 @@ static void EmuVerifyResourceIsRegistered(xbox::X_D3DResource *pResource, DWORD 
                 // We need to re-create it as a render target
                 switch (xboxResourceType) {
                     case xbox::X_D3DRTYPE_SURFACE: {
+                        auto xboxSurface = (xbox::X_D3DSurface*)pResource;
+
                         // Free the host surface
                         FreeHostResource(key);
 
@@ -3013,10 +3036,19 @@ ConvertedIndexBuffer& CxbxUpdateActiveIndexBuffer
 void UpdateHostBackBufferDesc()
 {
     IDirect3DSurface *pCurrentHostBackBuffer = nullptr;
-    auto hRet = g_pD3DDevice->GetBackBuffer(
+
+#ifdef CXBX_USE_D3D11
+	// Get the surface from the swap chain
+	HRESULT hRet = g_pSwapChain->GetBuffer(
+		0, // Buffer (zero-based buffer index)
+		__uuidof(pCurrentHostBackBuffer),
+		reinterpret_cast<void**>(&pCurrentHostBackBuffer)
+	);
+#else
+	auto hRet = g_pD3DDevice->GetBackBuffer(
         0, // iSwapChain
         0, D3DBACKBUFFER_TYPE_MONO, &pCurrentHostBackBuffer);
-
+#endif
     if (hRet != D3D_OK) {
         CxbxrKrnlAbort("Unable to get host backbuffer surface");
     }
@@ -4273,7 +4305,7 @@ xbox::X_D3DSurface* CxbxrImpl_GetBackBuffer2
 			return pXboxBackBuffer;
 		}
 
-		D3DSURFACE_DESC copySurfaceDesc;
+		D3DSurfaceDesc copySurfaceDesc;
 		hRet = pCopySrcSurface->GetDesc(&copySurfaceDesc);
 		if (hRet != D3D_OK) {
 			EmuLog(LOG_LEVEL::WARNING, "Could not get Xbox Back Buffer Host Surface Desc");
@@ -4368,7 +4400,7 @@ bool GetHostRenderTargetDimensions(DWORD *pHostWidth, DWORD *pHostHeight, IDirec
 	}
 
 	// Get current host render target dimensions
-	D3DSURFACE_DESC HostRenderTarget_Desc;
+	D3DSurfaceDesc HostRenderTarget_Desc;
 	pHostRenderTarget->GetDesc(&HostRenderTarget_Desc);
 
 	if (shouldRelease) {
@@ -5276,7 +5308,6 @@ xbox::void_xt WINAPI xbox::EMUPATCH(D3DDevice_CopyRects)
     // We skip the trampoline to prevent unnecessary work
     // As our surfaces remain on the GPU, calling the trampoline would just
     // result in a memcpy from an empty Xbox surface to another empty Xbox Surface
-    D3DSURFACE_DESC hostSourceDesc, hostDestDesc;
     auto pHostSourceSurface = GetHostSurface(pSourceSurface);
     auto pHostDestSurface = GetHostSurface(pDestinationSurface);
 
@@ -5287,6 +5318,7 @@ xbox::void_xt WINAPI xbox::EMUPATCH(D3DDevice_CopyRects)
         return;
     }
 
+	D3DSurfaceDesc hostSourceDesc, hostDestDesc;
     pHostSourceSurface->GetDesc(&hostSourceDesc);
     pHostDestSurface->GetDesc(&hostDestDesc);
 
@@ -5457,9 +5489,18 @@ xbox::dword_xt WINAPI xbox::EMUPATCH(D3DDevice_Swap)
 
 	// Fetch the host backbuffer
 	IDirect3DSurface *pCurrentHostBackBuffer = nullptr;
+#ifdef CXBX_USE_D3D11
+	// Get the surface from the swap chain
+	HRESULT hRet = g_pSwapChain->GetBuffer(
+		0, // Buffer (zero-based buffer index)
+		__uuidof(pCurrentHostBackBuffer),
+		reinterpret_cast<void**>(&pCurrentHostBackBuffer)
+	);
+#else
 	HRESULT hRet = g_pD3DDevice->GetBackBuffer(
 		0, // iSwapChain
 		0, D3DBACKBUFFER_TYPE_MONO, &pCurrentHostBackBuffer);
+#endif
 
 	DEBUG_D3DRESULT(hRet, "g_pD3DDevice->GetBackBuffer - Unable to get backbuffer surface!");
 	if (hRet == D3D_OK) {
@@ -5678,13 +5719,17 @@ xbox::dword_xt WINAPI xbox::EMUPATCH(D3DDevice_Swap)
 		pCurrentHostBackBuffer->Release();
 	}
 
+#ifdef CXBX_USE_D3D11
+	hRet = g_pSwapChain->Present(0, 0);
+	DEBUG_D3DRESULT(hRet, "g_pD3DDevice->Present");
+#else
 	g_pD3DDevice->EndScene();
 
 	hRet = g_pD3DDevice->Present(0, 0, 0, 0);
 	DEBUG_D3DRESULT(hRet, "g_pD3DDevice->Present");
 
 	hRet = g_pD3DDevice->BeginScene();
-
+#endif
     // RenderStates need reapplying each frame, but can be re-used between draw calls
     // This forces them to be reset
     XboxRenderStates.SetDirty();
